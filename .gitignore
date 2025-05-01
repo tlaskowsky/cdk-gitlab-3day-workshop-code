@@ -1,0 +1,28 @@
+# Node modules
+**/node_modules/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# OS/Editor junk
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+
+# Build output
+dist/
+build/
+
+# Dependency directories
+.pnpm/
+.yarn/
+.bun/
+
+# Optional: React or Next.js specifics
+.next/
+out/
+.cache/
