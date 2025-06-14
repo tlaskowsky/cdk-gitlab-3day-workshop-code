@@ -1,0 +1,46 @@
+{
+  "vpc-provider:account=683960772530:filter.isDefault=false:filter.tag:Name=WorkshopVPC:region=us-east-1:returnAsymmetricSubnets=true": {
+    "vpcId": "vpc-071d2a185bf4f728f",
+    "vpcCidrBlock": "10.0.0.0/16",
+    "ownerAccountId": "683960772530",
+    "availabilityZones": [],
+    "subnetGroups": [
+      {
+        "name": "public",
+        "type": "Public",
+        "subnets": [
+          {
+            "subnetId": "subnet-019db69f7e064a156",
+            "cidr": "10.0.0.0/24",
+            "availabilityZone": "us-east-1a",
+            "routeTableId": "rtb-047fe5115c876e6a1"
+          },
+          {
+            "subnetId": "subnet-0906f4623a3a19ff8",
+            "cidr": "10.0.1.0/24",
+            "availabilityZone": "us-east-1b",
+            "routeTableId": "rtb-0e4fbaa2f75fdafcd"
+          }
+        ]
+      },
+      {
+        "name": "private",
+        "type": "Private",
+        "subnets": [
+          {
+            "subnetId": "subnet-07fff51887ab0a87d",
+            "cidr": "10.0.2.0/24",
+            "availabilityZone": "us-east-1a",
+            "routeTableId": "rtb-0970d5c1d4781d50b"
+          },
+          {
+            "subnetId": "subnet-015066dda5018e7b0",
+            "cidr": "10.0.3.0/24",
+            "availabilityZone": "us-east-1b",
+            "routeTableId": "rtb-0a04f305e25d81030"
+          }
+        ]
+      }
+    ]
+  }
+}

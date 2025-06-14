@@ -1,0 +1,280 @@
+# .gitlab-ci.yml (Consistent Conventional Key Order)
+
+stages:
+  - validate
+  - build
+  - deploy-dev
+  - deploy-prod
+  - destroy_dev
+  - destroy_prod
+
+variables:
+  NODE_VERSION: "18"
+
+default:
+  tags: [cdk]
+
+validate_aws_connection:
+  stage: validate
+  image:
+    name: amazon/aws-cli:latest
+    entrypoint: [""]
+  tags: [cdk]
+  # No cache
+  # No needs
+  # No dependencies
+  script: # Script block (kept list format for simple script)
+    - echo "Verifying AWS connection..."
+    - aws sts get-caller-identity
+    - echo "AWS connection verified."
+  # No artifacts
+  # No environment
+  rules: # Control keys last
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+build_cdk:
+  stage: build
+  image: node:${NODE_VERSION}
+  tags: [cdk]
+  cache: # Setup keys first
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - node_modules/
+  # No needs
+  # No dependencies
+  script: | # Script block
+    echo "Installing dependencies..."
+    npm ci
+    echo "Building TypeScript code..."
+    npm run build
+    echo "Synthesizing CloudFormation template..."
+    if [ -z "$AWS_ACCOUNT_ID" ] || [ -z "$AWS_DEFAULT_REGION" ]; then
+      echo "Error: AWS_ACCOUNT_ID or AWS_DEFAULT_REGION is not set."
+      exit 1
+    fi
+    npx cdk synth --all \
+      -c account=${AWS_ACCOUNT_ID} \
+      -c region=${AWS_DEFAULT_REGION}
+    # ... (npm ci, npm run build, if check, npx cdk synth) ...
+    echo "Running unit tests..."
+    npm test # <<< ADD THIS LINE
+    
+  artifacts: # Post-execution keys
+    paths: [cdk.out/]
+    expire_in: 1 hour
+  # No environment
+  rules: # Control keys last
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+deploy_to_dev:
+  stage: deploy-dev
+  image: node:${NODE_VERSION}
+  tags: [cdk]
+  cache: # Setup keys first
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - node_modules/
+    policy: pull
+  needs: # Setup keys first
+    - job: build_cdk
+      optional: true
+  dependencies: # Setup keys first
+    - build_cdk
+  script: | # Keep multi-line format
+    echo "Installing dependencies for deploy job..."
+    npm ci
+    echo "Deploying stacks to Dev environment (Region: ${AWS_DEFAULT_REGION:-check_runner_config})..."
+    # Check Dev variables (these likely come from default GitLab config)
+    if [ -z "$AWS_ACCOUNT_ID" ] || [ -z "$AWS_DEFAULT_REGION" ]; then
+      echo "Error: AWS_ACCOUNT_ID or AWS_DEFAULT_REGION is not set for Dev."
+      exit 1
+    fi
+    # *** Define unique prefix for Dev ***
+    STUDENT_PREFIX="${GITLAB_USER_LOGIN:-stuXX}" # Use same logic as Prod
+    DEV_PREFIX="${STUDENT_PREFIX}-dev"
+    echo "Using prefix: ${DEV_PREFIX}"
+    # *** Modify cdk deploy command to ADD context flags ***
+    # Note: Command broken onto multiple lines using \ for readability
+    npx cdk deploy --all \
+      --require-approval never \
+      --outputs-file cdk-outputs.json \
+      -c account=${AWS_ACCOUNT_ID} \
+      -c region=${AWS_DEFAULT_REGION} \
+      -c prefix=${DEV_PREFIX} \
+      -c environment=dev
+    echo "Deployment complete."
+  artifacts: # Post-execution keys
+    paths:
+      - cdk-outputs.json
+    expire_in: 1 day
+  environment: # Post-execution keys
+    name: dev
+  rules: # Control keys last
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+# Job to deploy the CDK application to the Prod environment
+deploy_to_prod:
+  stage: deploy-prod
+  image: public.ecr.aws/sam/build-nodejs18.x:latest
+  tags: [cdk] # Assuming 'cdk' runner tag
+  cache: # Setup keys first
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - node_modules/
+    policy: pull
+  needs: # Setup keys first
+    - job: build_cdk # Depends on build_cdk completing successfully
+  dependencies: [build_cdk] # Download cdk.out artifact
+  script: | # Script block
+    echo "Installing dependencies for deploy job..."
+    npm ci
+    # --- Add jq install if needed ---
+    # Uncomment the appropriate line below if jq is not in the base node image
+    # echo "Ensuring jq is installed..."
+    # apt-get update && apt-get install -y jq || apk add --no-cache jq # Example for Debian/Alpine
+    echo "Attempting to assume role in Prod account: ${PROD_ACCOUNT_ID}..."
+    # --- Assume Role Script (same as bootstrap_prod) ---
+    # Note about ROLE_ARN: See note in bootstrap_prod job.
+    ROLE_ARN="arn:aws:iam::316751577207:role/CDKDeployRole" # !!! REPLACE THIS !!!
+    SESSION_NAME="GitLab-ProdDeploy-${CI_PIPELINE_ID}"
+    echo "Assuming Role ARN: ${ROLE_ARN}"
+    CREDENTIALS=$(aws sts assume-role --role-arn "${ROLE_ARN}" --role-session-name "${SESSION_NAME}" --query 'Credentials' --output json)
+    if [ -z "$CREDENTIALS" ] || [ "$CREDENTIALS" == "null" ]; then echo "Failed to assume role!"; exit 1; fi
+    export AWS_ACCESS_KEY_ID=$(echo $CREDENTIALS | jq -r '.AccessKeyId')
+    export AWS_SECRET_ACCESS_KEY=$(echo $CREDENTIALS | jq -r '.SecretAccessKey')
+    export AWS_SESSION_TOKEN=$(echo $CREDENTIALS | jq -r '.SessionToken')
+    if [ "$AWS_ACCESS_KEY_ID" == "null" ]; then echo "Failed to parse credentials from assumed role! Is jq installed?"; exit 1; fi
+    echo "Role assumed successfully. Session token expires at: $(echo $CREDENTIALS | jq -r '.Expiration')"
+    # Verify assumed identity
+    echo "Verifying assumed identity..."
+    aws sts get-caller-identity
+    # Deploy using assumed creds and Prod context
+    echo "Deploying stacks to Prod environment (Account: ${PROD_ACCOUNT_ID} Region: ${PROD_REGION})..."
+    if [ -z "$PROD_ACCOUNT_ID" ] || [ -z "$PROD_REGION" ]; then echo "PROD_ACCOUNT_ID or PROD_REGION variable not set!"; exit 1; fi
+    # *** Define your unique prefix (e.g., using GitLab User Login) ***
+    # Replace 'stuXX' with a unique identifier. Using $GITLAB_USER_LOGIN requires it to be available.
+    # Alternatively, use a predefined student ID variable like $STUDENT_ID set in GitLab variables.
+    STUDENT_PREFIX="${GITLAB_USER_LOGIN:-stu20}" # Example: Use GitLab login or default 'stuXX'
+    PROD_PREFIX="${STUDENT_PREFIX}-prod"
+    echo "Using prefix: ${PROD_PREFIX}"
+    # Pass context explicitly, including prefix and environment
+    # Note: Command broken onto multiple lines using \ for readability
+    npx cdk deploy --all \
+      --require-approval never \
+      --outputs-file cdk-outputs-prod.json \
+      -c account=${PROD_ACCOUNT_ID} \
+      -c region=${PROD_REGION} \
+      -c prefix=${PROD_PREFIX} \
+      -c environment=prod
+    echo "Deployment to Prod complete."
+  artifacts: # Post-execution keys
+    paths:
+      - cdk-outputs-prod.json # Use different name for prod outputs
+    expire_in: 1 day
+  environment: # Post-execution keys
+    name: production
+    # url: <Your Production URL if applicable>
+  rules: # Control keys last
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  when: manual # *** IMPORTANT: Makes this a manual action in GitLab UI ***
+  allow_failure: false # Fail pipeline if manual deploy fails
+
+cleanup_dev:
+  stage: destroy_dev
+  image: node:${NODE_VERSION}
+  tags: [cdk]
+  cache: # Setup keys first
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - node_modules/
+    policy: pull
+  needs: # Setup keys first
+    - job: build_cdk
+      optional: true
+  dependencies: # Setup keys first
+    - build_cdk
+  script: | # Keep multi-line format
+    echo "Installing dependencies for deploy job..."
+    npm ci
+    echo "Deploying stacks to Dev environment (Region: ${AWS_DEFAULT_REGION:-check_runner_config})..."
+    # Check Dev variables (these likely come from default GitLab config)
+    if [ -z "$AWS_ACCOUNT_ID" ] || [ -z "$AWS_DEFAULT_REGION" ]; then
+      echo "Error: AWS_ACCOUNT_ID or AWS_DEFAULT_REGION is not set for Dev."
+      exit 1
+    fi
+    # *** Define unique prefix for Dev ***
+    STUDENT_PREFIX="${GITLAB_USER_LOGIN:-stuXX}" # Use same logic as Prod
+    DEV_PREFIX="${STUDENT_PREFIX}-dev"
+    echo "Using prefix: ${DEV_PREFIX}"
+    # *** Modify cdk deploy command to ADD context flags ***
+    # Note: Command broken onto multiple lines using \ for readability
+    npx cdk destroy --all --force \
+      -c account=${AWS_ACCOUNT_ID} \
+      -c region=${AWS_DEFAULT_REGION} \
+      -c prefix=${DEV_PREFIX} \
+      -c environment=dev
+  when: manual
+
+cleanup_prod:
+  stage: destroy_prod
+  image: public.ecr.aws/sam/build-nodejs18.x:latest
+  tags: [cdk] # Assuming 'cdk' runner tag
+  cache: # Setup keys first
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - node_modules/
+    policy: pull
+  needs: # Setup keys first
+    - job: build_cdk # Depends on build_cdk completing successfully
+  dependencies: [build_cdk] # Download cdk.out artifact
+  script: | # Script block
+    echo "Installing dependencies for deploy job..."
+    npm ci
+    # --- Add jq install if needed ---
+    # Uncomment the appropriate line below if jq is not in the base node image
+    # echo "Ensuring jq is installed..."
+    # apt-get update && apt-get install -y jq || apk add --no-cache jq # Example for Debian/Alpine
+    echo "Attempting to assume role in Prod account: ${PROD_ACCOUNT_ID}..."
+    # --- Assume Role Script (same as bootstrap_prod) ---
+    # Note about ROLE_ARN: See note in bootstrap_prod job.
+    ROLE_ARN="arn:aws:iam::316751577207:role/CDKDeployRole" # !!! REPLACE THIS !!!
+    SESSION_NAME="GitLab-ProdDeploy-${CI_PIPELINE_ID}"
+    echo "Assuming Role ARN: ${ROLE_ARN}"
+    CREDENTIALS=$(aws sts assume-role --role-arn "${ROLE_ARN}" --role-session-name "${SESSION_NAME}" --query 'Credentials' --output json)
+    if [ -z "$CREDENTIALS" ] || [ "$CREDENTIALS" == "null" ]; then echo "Failed to assume role!"; exit 1; fi
+    export AWS_ACCESS_KEY_ID=$(echo $CREDENTIALS | jq -r '.AccessKeyId')
+    export AWS_SECRET_ACCESS_KEY=$(echo $CREDENTIALS | jq -r '.SecretAccessKey')
+    export AWS_SESSION_TOKEN=$(echo $CREDENTIALS | jq -r '.SessionToken')
+    if [ "$AWS_ACCESS_KEY_ID" == "null" ]; then echo "Failed to parse credentials from assumed role! Is jq installed?"; exit 1; fi
+    echo "Role assumed successfully. Session token expires at: $(echo $CREDENTIALS | jq -r '.Expiration')"
+    # Verify assumed identity
+    echo "Verifying assumed identity..."
+    aws sts get-caller-identity
+    # Deploy using assumed creds and Prod context
+    echo "Deploying stacks to Prod environment (Account: ${PROD_ACCOUNT_ID} Region: ${PROD_REGION})..."
+    if [ -z "$PROD_ACCOUNT_ID" ] || [ -z "$PROD_REGION" ]; then echo "PROD_ACCOUNT_ID or PROD_REGION variable not set!"; exit 1; fi
+    # *** Define your unique prefix (e.g., using GitLab User Login) ***
+    # Replace 'stuXX' with a unique identifier. Using $GITLAB_USER_LOGIN requires it to be available.
+    # Alternatively, use a predefined student ID variable like $STUDENT_ID set in GitLab variables.
+    STUDENT_PREFIX="${GITLAB_USER_LOGIN:-stu20}" # Example: Use GitLab login or default 'stuXX'
+    PROD_PREFIX="${STUDENT_PREFIX}-prod"
+    echo "Using prefix: ${PROD_PREFIX}"
+    # Pass context explicitly, including prefix and environment
+    # Note: Command broken onto multiple lines using \ for readability
+    npx cdk destroy --all --force \
+      -c account=${PROD_ACCOUNT_ID} \
+      -c region=${PROD_REGION} \
+      -c prefix=${PROD_PREFIX} \
+      -c environment=prod
+  when: manual
+
